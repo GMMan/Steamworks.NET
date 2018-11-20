@@ -27,7 +27,11 @@
 
 // Unity 32bit Mono on Windows crashes with ThisCall/Cdecl for some reason, StdCall without the 'this' ptr is the only thing that works..?
 #if (UNITY_EDITOR_WIN && !UNITY_EDITOR_64) || (!UNITY_EDITOR && UNITY_STANDALONE_WIN && !UNITY_64)
-	#define STDCALL
+	#if ENABLE_IL2CPP
+		#error IL2CPP does not support calling convention needed to make callbacks work on Unity/Windows x86.
+	#else
+		#define STDCALL
+	#endif
 #elif STEAMWORKS_WIN
 	#define THISCALL
 #endif
@@ -49,6 +53,10 @@
 
 using System;
 using System.Runtime.InteropServices;
+#if ENABLE_IL2CPP
+using System.Collections.Generic;
+using AOT;
+#endif
 
 namespace Steamworks {
 	public static class CallbackDispatcher {
@@ -64,7 +72,28 @@ namespace Steamworks {
 		}
 	}
 
-	public sealed class Callback<T> : IDisposable {
+    internal interface ICallback
+    {
+        void OnRunCallback(
+#if !STDCALL
+            IntPtr thisptr,
+#endif
+            IntPtr pvParam);
+
+        void OnRunCallResult(
+#if !STDCALL
+            IntPtr thisptr,
+#endif
+            IntPtr pvParam, bool bFailed, ulong hSteamAPICall);
+
+        int OnGetCallbackSizeBytes(
+#if !STDCALL
+            IntPtr thisptr
+#endif
+            );
+    }
+
+	public sealed class Callback<T> : IDisposable, ICallback {
 		private CCallbackBaseVTable m_CallbackBaseVTable;
 		private IntPtr m_pVTable = IntPtr.Zero;
 		private CCallbackBase m_CCallbackBase;
@@ -120,6 +149,9 @@ namespace Steamworks {
 			}
 
 			if (m_pCCallbackBase.IsAllocated) {
+#if ENABLE_IL2CPP
+                CCallbackBase.Unregister(m_pCCallbackBase.AddrOfPinnedObject());
+#endif
 				m_pCCallbackBase.Free();
 			}
 
@@ -155,7 +187,7 @@ namespace Steamworks {
 			m_CCallbackBase.m_nCallbackFlags |= CCallbackBase.k_ECallbackFlagsGameServer;
 		}
 
-		private void OnRunCallback(
+		public void OnRunCallback(
 #if !STDCALL
 			IntPtr thisptr,
 #endif
@@ -169,12 +201,12 @@ namespace Steamworks {
 		}
 
 		// Shouldn't ever get called here, but this is what C++ Steamworks does!
-		private void OnRunCallResult(
+		public void OnRunCallResult(
 #if !STDCALL
 			IntPtr thisptr,
 #endif
 			IntPtr pvParam, bool bFailed, ulong hSteamAPICall) {
-			try { 
+			try {
 				m_Func((T)Marshal.PtrToStructure(pvParam, typeof(T)));
 			}
 			catch (Exception e) {
@@ -182,7 +214,7 @@ namespace Steamworks {
 			}
 		}
 
-		private int OnGetCallbackSizeBytes(
+		public int OnGetCallbackSizeBytes(
 #if !STDCALL
 			IntPtr thisptr
 #endif
@@ -192,24 +224,38 @@ namespace Steamworks {
 
 		// Steamworks.NET Specific
 		private void BuildCCallbackBase() {
-			m_CallbackBaseVTable = new CCallbackBaseVTable() {
-				m_RunCallResult = OnRunCallResult,
+            m_CCallbackBase = new CCallbackBase
+            {
+                m_nCallbackFlags = 0,
+                m_iCallback = CallbackIdentities.GetCallbackIdentity(typeof(T))
+            };
+
+#if ENABLE_IL2CPP
+            m_CallbackBaseVTable = new CCallbackBaseVTable()
+            {
+                m_RunCallback = CCallbackBase.OnRunCallback,
+                m_RunCallResult = CCallbackBase.OnRunCallResult,
+                m_GetCallbackSizeBytes = CCallbackBase.OnGetCallbackSizeBytes
+            };
+#else
+            m_CallbackBaseVTable = new CCallbackBaseVTable() {
 				m_RunCallback = OnRunCallback,
+				m_RunCallResult = OnRunCallResult,
 				m_GetCallbackSizeBytes = OnGetCallbackSizeBytes
 			};
-			m_pVTable = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(CCallbackBaseVTable)));
-			Marshal.StructureToPtr(m_CallbackBaseVTable, m_pVTable, false);
+#endif
+            m_pVTable = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(CCallbackBaseVTable)));
+            m_CCallbackBase.m_vfptr = m_pVTable;
+            Marshal.StructureToPtr(m_CallbackBaseVTable, m_pVTable, false);
 
-			m_CCallbackBase = new CCallbackBase() {
-				m_vfptr = m_pVTable,
-				m_nCallbackFlags = 0,
-				m_iCallback = CallbackIdentities.GetCallbackIdentity(typeof(T))
-			};
-			m_pCCallbackBase = GCHandle.Alloc(m_CCallbackBase, GCHandleType.Pinned);
+            m_pCCallbackBase = GCHandle.Alloc(m_CCallbackBase, GCHandleType.Pinned);
+#if ENABLE_IL2CPP
+            CCallbackBase.Register(m_pCCallbackBase.AddrOfPinnedObject(), this);
+#endif
 		}
 	}
 
-	public sealed class CallResult<T> : IDisposable {
+	public sealed class CallResult<T> : IDisposable, ICallback {
 		private CCallbackBaseVTable m_CallbackBaseVTable;
 		private IntPtr m_pVTable = IntPtr.Zero;
 		private CCallbackBase m_CCallbackBase;
@@ -257,6 +303,9 @@ namespace Steamworks {
 			}
 
 			if (m_pCCallbackBase.IsAllocated) {
+#if ENABLE_IL2CPP
+                CCallbackBase.Unregister(m_pCCallbackBase.AddrOfPinnedObject());
+#endif
 				m_pCCallbackBase.Free();
 			}
 
@@ -301,7 +350,7 @@ namespace Steamworks {
 		}
 
 		// Shouldn't ever get called here, but this is what C++ Steamworks does!
-		private void OnRunCallback(
+		public void OnRunCallback(
 #if !STDCALL
 			IntPtr thisptr,
 #endif
@@ -316,7 +365,7 @@ namespace Steamworks {
 			}
 		}
 
-		private void OnRunCallResult(
+		public void OnRunCallResult(
 #if !STDCALL
 			IntPtr thisptr,
 #endif
@@ -334,7 +383,7 @@ namespace Steamworks {
 			}
 		}
 
-		private int OnGetCallbackSizeBytes(
+		public int OnGetCallbackSizeBytes(
 #if !STDCALL
 			IntPtr thisptr
 #endif
@@ -344,20 +393,35 @@ namespace Steamworks {
 
 		// Steamworks.NET Specific
 		private void BuildCCallbackBase() {
-			m_CallbackBaseVTable = new CCallbackBaseVTable() {
+            m_CCallbackBase = new CCallbackBase
+            {
+                m_nCallbackFlags = 0,
+                m_iCallback = CallbackIdentities.GetCallbackIdentity(typeof(T))
+            };
+
+#if ENABLE_IL2CPP
+            m_CallbackBaseVTable = new CCallbackBaseVTable()
+            {
+                m_RunCallback = CCallbackBase.OnRunCallback,
+                m_RunCallResult = CCallbackBase.OnRunCallResult,
+                m_GetCallbackSizeBytes = CCallbackBase.OnGetCallbackSizeBytes
+            };
+#else
+            m_CallbackBaseVTable = new CCallbackBaseVTable() {
 				m_RunCallback = OnRunCallback,
 				m_RunCallResult = OnRunCallResult,
 				m_GetCallbackSizeBytes = OnGetCallbackSizeBytes
 			};
-			m_pVTable = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(CCallbackBaseVTable)));
-			Marshal.StructureToPtr(m_CallbackBaseVTable, m_pVTable, false);
+#endif
 
-			m_CCallbackBase = new CCallbackBase() {
-				m_vfptr = m_pVTable,
-				m_nCallbackFlags = 0,
-				m_iCallback = CallbackIdentities.GetCallbackIdentity(typeof(T))
-			};
-			m_pCCallbackBase = GCHandle.Alloc(m_CCallbackBase, GCHandleType.Pinned);
+            m_pVTable = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(CCallbackBaseVTable)));
+            m_CCallbackBase.m_vfptr = m_pVTable;
+            Marshal.StructureToPtr(m_CallbackBaseVTable, m_pVTable, false);
+
+            m_pCCallbackBase = GCHandle.Alloc(m_CCallbackBase, GCHandleType.Pinned);
+#if ENABLE_IL2CPP
+            CCallbackBase.Register(m_pCCallbackBase.AddrOfPinnedObject(), this);
+#endif
 		}
 	}
 
@@ -369,6 +433,85 @@ namespace Steamworks {
 		public IntPtr m_vfptr;
 		public byte m_nCallbackFlags;
 		public int m_iCallback;
+
+#if ENABLE_IL2CPP
+        static Dictionary<IntPtr, ICallback> registeredCallbacks = new Dictionary<IntPtr, ICallback>();
+
+        internal static void Register(IntPtr thisptr, ICallback callback)
+        {
+            registeredCallbacks.Add(thisptr, callback);
+        }
+
+        internal static void Unregister(IntPtr thisptr)
+        {
+            registeredCallbacks.Remove(thisptr);
+        }
+
+        static ICallback GetRegisteredCallback(IntPtr thisptr)
+        {
+            ICallback callback;
+            return registeredCallbacks.TryGetValue(thisptr, out callback) ? callback : null;
+        }
+
+        [MonoPInvokeCallback(typeof(CCallbackBaseVTable.RunCBDel))]
+        static internal void OnRunCallback(
+#if !STDCALL
+            IntPtr thisptr,
+#endif
+            IntPtr pvParam)
+        {
+            var callback = GetRegisteredCallback(thisptr);
+            if (callback != null)
+            {
+                callback.OnRunCallback(
+#if !STDCALL
+                    thisptr,
+#endif
+                    pvParam);
+            }
+        }
+
+        [MonoPInvokeCallback(typeof(CCallbackBaseVTable.RunCRDel))]
+        static internal void OnRunCallResult(
+#if !STDCALL
+            IntPtr thisptr,
+#endif
+            IntPtr pvParam, bool bFailed, ulong hSteamAPICall)
+        {
+            var callback = GetRegisteredCallback(thisptr);
+            if (callback != null)
+            {
+                callback.OnRunCallResult(
+#if !STDCALL
+                    thisptr,
+#endif
+                    pvParam, bFailed, hSteamAPICall);
+            }
+        }
+
+        [MonoPInvokeCallback(typeof(CCallbackBaseVTable.GetCallbackSizeBytesDel))]
+        static internal int OnGetCallbackSizeBytes(
+#if !STDCALL
+            IntPtr thisptr
+#endif
+            )
+        {
+            var callback = GetRegisteredCallback(thisptr);
+            if (callback != null)
+            {
+
+                return callback.OnGetCallbackSizeBytes(
+#if !STDCALL
+                    thisptr
+#endif
+                );
+            }
+            else
+            {
+                return 0;
+            }
+        }
+#endif
 	}
 
 	[StructLayout(LayoutKind.Sequential)]
